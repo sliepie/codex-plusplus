@@ -39,7 +39,8 @@ test("buildManagedMcpBlock creates TOML entries and resolves local server script
     assert.equal(built.skippedServerNames.length, 0);
     assert.match(built.block, /\[mcp_servers\.native-widgets\]/);
     assert.match(built.block, /command = "node"/);
-    assert.match(built.block, new RegExp(`args = \\["${escapeRegExp(join(tweakDir, "mcp-server.js"))}"\\]`));
+    const serverPath = JSON.stringify(join(tweakDir, "mcp-server.js"));
+    assert.match(built.block, new RegExp(`args = \\[${escapeRegExp(serverPath)}\\]`));
     assert.match(built.block, /env = \{ WIDGETS = "1" \}/);
   });
 });

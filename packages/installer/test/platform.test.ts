@@ -42,7 +42,7 @@ test("locateCodex reads beta bundle metadata from override path on macOS", { ski
   }
 });
 
-test("resolveLinuxInstall supports am-will codex-app install directory", () => {
+test("resolveLinuxInstall supports am-will codex-app install directory", { skip: process.platform === "win32" }, () => {
   const root = mkdtempSync(join(tmpdir(), "codexpp-platform-"));
   try {
     const app = join(root, "codex-desktop");

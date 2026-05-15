@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @codex-plusplus/sdk && npm run build --workspace @codex-plusplus/runtime && npm run build --workspace @codex-plusplus/loader && npm run build --workspace codex-plusplus",
-    "clean": "rm -rf packages/*/dist packages/installer/assets/runtime",
+    "clean": "node ./scripts/clean.mjs",
     "test": "npm run build --workspace @codex-plusplus/sdk && node --import tsx --test packages/*/test/*.test.ts",
     "audit": "npm audit --workspaces --include-workspace-root",
     "prepare": "npm run build"

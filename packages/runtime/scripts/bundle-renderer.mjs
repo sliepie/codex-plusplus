@@ -20,6 +20,7 @@ await build({
   format: "cjs",
   external: ["electron"],
   sourcemap: "inline",
+  sourcesContent: false,
   minify: false,
   logLevel: "info",
 });
@@ -33,6 +34,7 @@ await build({
   format: "cjs",
   external: ["electron"],
   sourcemap: "inline",
+  sourcesContent: false,
   minify: false,
   logLevel: "info",
   // chokidar uses dynamic native fsevents on macOS via optional dep; let
