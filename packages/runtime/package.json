@@ -3,13 +3,12 @@
   "version": "0.1.7",
   "type": "commonjs",
   "main": "dist/main.js",
-  "description": "In-app runtime: discovers tweaks, injects settings UI, hot-reloads.",
+  "description": "In-app runtime: discovers tweaks, injects settings UI, and reloads on explicit requests.",
   "scripts": {
     "build": "tsc -p tsconfig.json && node ./scripts/bundle-renderer.mjs"
   },
   "dependencies": {
-    "@codex-plusplus/sdk": "*",
-    "chokidar": "^4.0.0"
+    "@codex-plusplus/sdk": "*"
   },
   "devDependencies": {
     "@types/node": "^22.19.17",

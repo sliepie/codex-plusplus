@@ -3,11 +3,14 @@ import {
   chmodSync,
   createWriteStream,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   renameSync,
+  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -331,7 +334,40 @@ function npmCommand(): string {
 
 function refreshMovedWorkspaceLinks(sourceRoot: string): void {
   if (process.platform !== "win32") return;
-  installDependencies(sourceRoot);
+  repairWorkspaceLinks(sourceRoot);
+}
+
+function repairWorkspaceLinks(sourceRoot: string): void {
+  resetWorkspaceLink(sourceRoot, "codex-plusplus", "packages/installer");
+  resetWorkspaceLink(sourceRoot, "@codex-plusplus/loader", "packages/loader");
+  resetWorkspaceLink(sourceRoot, "@codex-plusplus/runtime", "packages/runtime");
+  resetWorkspaceLink(sourceRoot, "@codex-plusplus/sdk", "packages/sdk");
+}
+
+function resetWorkspaceLink(sourceRoot: string, packageName: string, targetRelative: string): void {
+  const target = join(sourceRoot, targetRelative);
+  if (!existsSync(target)) throw new Error(`Workspace package target was not found: ${targetRelative}`);
+
+  const nodeModules = join(sourceRoot, "node_modules");
+  const slash = packageName.indexOf("/");
+  const link = slash >= 0
+    ? join(nodeModules, packageName.slice(0, slash), packageName.slice(slash + 1))
+    : join(nodeModules, packageName);
+  mkdirSync(dirname(link), { recursive: true });
+  removeWorkspaceLink(link);
+  symlinkSync(target, link, "junction");
+}
+
+function removeWorkspaceLink(link: string): void {
+  try {
+    if (lstatSync(link).isSymbolicLink()) {
+      unlinkSync(link);
+      return;
+    }
+  } catch {
+    return;
+  }
+  rmSync(link, { recursive: true, force: true });
 }
 
 function runRepairIfRequested(opts: Opts, sourceRoot: string, cwd: string): void {

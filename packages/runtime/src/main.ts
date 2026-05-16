@@ -8,12 +8,14 @@
  * code). The renderer-side runtime is bundled separately into preload.js.
  */
 import { app, BrowserView, BrowserWindow, clipboard, ipcMain, session, shell, webContents } from "electron";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { access, cp as cpAsync, mkdir, readFile, readdir, rm as rmAsync, writeFile } from "node:fs/promises";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomInt } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
-import chokidar from "chokidar";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { discoverTweaks, type DiscoveredTweak } from "./tweak-discovery";
 import { createDiskStorage, type DiskStorage } from "./storage";
 import { syncManagedMcpServers } from "./mcp-sync";
@@ -179,7 +181,9 @@ function isCodexPlusPlusSafeModeEnabled(): boolean {
   return readState().codexPlusPlus?.safeMode === true;
 }
 function isTweakEnabled(id: string): boolean {
-  const s = readState();
+  return isTweakEnabledFromState(id, readState());
+}
+function isTweakEnabledFromState(id: string, s: PersistedState): boolean {
   if (s.codexPlusPlus?.safeMode === true) return false;
   return s.tweaks?.[id]?.enabled !== false;
 }
@@ -224,6 +228,7 @@ function isPathInside(parent: string, target: string): boolean {
 }
 
 function log(level: "info" | "warn" | "error", ...args: unknown[]): void {
+  if (level === "info" && !isRuntimeDebugLoggingEnabled()) return;
   const line = `[${new Date().toISOString()}] [${level}] ${args
     .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
     .join(" ")}\n`;
@@ -231,6 +236,10 @@ function log(level: "info" | "warn" | "error", ...args: unknown[]): void {
     appendCappedLog(LOG_FILE, line);
   } catch {}
   if (level === "error") console.error("[codex-plusplus]", ...args);
+}
+
+function isRuntimeDebugLoggingEnabled(): boolean {
+  return process.env.CODEXPP_DEBUG_LOGS === "1";
 }
 
 function installSparkleUpdateHook(): void {
@@ -510,14 +519,15 @@ app.on("will-quit", () => {
 
 // 3. IPC: expose tweak metadata + reveal-in-finder.
 ipcMain.handle("codexpp:list-tweaks", async () => {
-  await Promise.all(tweakState.discovered.map((t) => ensureTweakUpdateCheck(t)));
-  const updateChecks = readState().tweakUpdateChecks ?? {};
+  scheduleTweakUpdateChecks(tweakState.discovered);
+  const state = readState();
+  const updateChecks = state.tweakUpdateChecks ?? {};
   return tweakState.discovered.map((t) => ({
     manifest: t.manifest,
     entry: t.entry,
     dir: t.dir,
     entryExists: existsSync(t.entry),
-    enabled: isTweakEnabled(t.manifest.id),
+    enabled: isTweakEnabledFromState(t.manifest.id, state),
     update: updateChecks[t.manifest.id] ?? null,
   }));
 });
@@ -577,13 +587,22 @@ ipcMain.handle("codexpp:run-codexpp-update", async () => {
   return readSelfUpdateState();
 });
 
-ipcMain.handle("codexpp:get-watcher-health", () => getWatcherHealth(userRoot!));
+ipcMain.handle("codexpp:get-watcher-health", async () => {
+  const now = Date.now();
+  if (watcherHealthCache && now - watcherHealthCache.checkedAt < WATCHER_HEALTH_CACHE_MS) {
+    return watcherHealthCache.value;
+  }
+  const value = await getWatcherHealth(userRoot!);
+  watcherHealthCache = { checkedAt: now, value };
+  return value;
+});
 
 ipcMain.handle("codexpp:get-tweak-store", async () => {
   const store = await fetchTweakStoreRegistry();
   const registry = store.registry;
   const installed = new Map(tweakState.discovered.map((t) => [t.manifest.id, t]));
   const entries = shuffleStoreEntries(registry.entries, randomInt);
+  const state = readState();
   return {
     ...registry,
     sourceUrl: TWEAK_STORE_INDEX_URL,
@@ -599,7 +618,7 @@ ipcMain.handle("codexpp:get-tweak-store", async () => {
         installed: local
           ? {
               version: local.manifest.version,
-              enabled: isTweakEnabled(local.manifest.id),
+              enabled: isTweakEnabledFromState(local.manifest.id, state),
             }
           : null,
       };
@@ -643,6 +662,9 @@ ipcMain.handle("codexpp:read-tweak-source", (_e, entryPath: string) => {
  * result still lives under TWEAKS_DIR, (3) cap output size at 1 MiB.
  */
 const ASSET_MAX_BYTES = 1024 * 1024;
+const WATCHER_HEALTH_CACHE_MS = 30_000;
+const ensuredTweakDataDirs = new Set<string>();
+let watcherHealthCache: { checkedAt: number; value: Awaited<ReturnType<typeof getWatcherHealth>> } | null = null;
 const MIME_BY_EXT: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -686,21 +708,32 @@ ipcMain.on("codexpp:preload-log", (_e, level: "info" | "warn" | "error", msg: st
 // Sandbox-safe filesystem ops for renderer-scope tweaks. Each tweak gets
 // a sandboxed dir under userRoot/tweak-data/<id>. Renderer side calls these
 // over IPC instead of using Node fs directly.
-ipcMain.handle("codexpp:tweak-fs", (_e, op: string, id: string, p: string, c?: string) => {
+ipcMain.handle("codexpp:tweak-fs", async (_e, op: string, id: string, p: string, c?: string) => {
   if (!/^[a-zA-Z0-9._-]+$/.test(id)) throw new Error("bad tweak id");
   const dir = join(userRoot!, "tweak-data", id);
-  mkdirSync(dir, { recursive: true });
+  await ensureTweakDataDir(dir);
   const full = resolve(dir, p);
   if (!isPathInside(dir, full) || full === dir) throw new Error("path traversal");
-  const fs = require("node:fs") as typeof import("node:fs");
   switch (op) {
-    case "read": return fs.readFileSync(full, "utf8");
-    case "write": return fs.writeFileSync(full, c ?? "", "utf8");
-    case "exists": return fs.existsSync(full);
+    case "read": return readFile(full, "utf8");
+    case "write": return writeFile(full, c ?? "", "utf8");
+    case "exists":
+      try {
+        await access(full);
+        return true;
+      } catch {
+        return false;
+      }
     case "dataDir": return dir;
     default: throw new Error(`unknown op: ${op}`);
   }
 });
+
+async function ensureTweakDataDir(dir: string): Promise<void> {
+  if (ensuredTweakDataDirs.has(dir)) return;
+  await mkdir(dir, { recursive: true });
+  ensuredTweakDataDirs.add(dir);
+}
 
 ipcMain.handle("codexpp:user-paths", () => ({
   userRoot,
@@ -727,43 +760,11 @@ ipcMain.handle("codexpp:copy-text", (_e, text: string) => {
 });
 
 // Manual force-reload trigger from the renderer (e.g. the "Force Reload"
-// button on our injected Tweaks page). Bypasses the watcher debounce.
+// button on our injected Tweaks page).
 ipcMain.handle("codexpp:reload-tweaks", () => {
   reloadTweaks("manual", tweakLifecycleDeps);
   return { at: Date.now(), count: tweakState.discovered.length };
 });
-
-// 4. Filesystem watcher → debounced reload + broadcast.
-//    We watch the tweaks dir for any change. On the first tick of inactivity
-//    we stop main-side tweaks, clear their cached modules, re-discover, then
-//    restart and broadcast `codexpp:tweaks-changed` to every renderer so it
-//    can re-init its host.
-const RELOAD_DEBOUNCE_MS = 250;
-let reloadTimer: NodeJS.Timeout | null = null;
-function scheduleReload(reason: string): void {
-  if (reloadTimer) clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(() => {
-    reloadTimer = null;
-    reloadTweaks(reason, tweakLifecycleDeps);
-  }, RELOAD_DEBOUNCE_MS);
-}
-
-try {
-  const watcher = chokidar.watch(TWEAKS_DIR, {
-    ignoreInitial: true,
-    // Wait for files to settle before triggering — guards against partially
-    // written tweak files during editor saves / git checkouts.
-    awaitWriteFinish: { stabilityThreshold: 150, pollInterval: 50 },
-    // Avoid eating CPU on huge node_modules trees inside tweak folders.
-    ignored: (p) => p.includes(`${TWEAKS_DIR}/`) && /\/node_modules\//.test(p),
-  });
-  watcher.on("all", (event, path) => scheduleReload(`${event} ${path}`));
-  watcher.on("error", (e) => log("warn", "watcher error:", e));
-  log("info", "watching", TWEAKS_DIR);
-  app.on("will-quit", () => watcher.close().catch(() => {}));
-} catch (e) {
-  log("error", "failed to start watcher:", e);
-}
 
 // --- helpers ---
 
@@ -780,11 +781,12 @@ function loadAllMainTweaks(): void {
     tweakState.discovered = [];
   }
 
-  syncMcpServersFromEnabledTweaks();
+  const state = readState();
+  syncMcpServersFromEnabledTweaks(state);
 
   for (const t of tweakState.discovered) {
     if (!isMainProcessTweakScope(t.manifest.scope)) continue;
-    if (!isTweakEnabled(t.manifest.id)) {
+    if (!isTweakEnabledFromState(t.manifest.id, state)) {
       log("info", `skipping disabled main tweak: ${t.manifest.id}`);
       continue;
     }
@@ -814,11 +816,11 @@ function loadAllMainTweaks(): void {
   }
 }
 
-function syncMcpServersFromEnabledTweaks(): void {
+function syncMcpServersFromEnabledTweaks(state = readState()): void {
   try {
     const result = syncManagedMcpServers({
       configPath: CODEX_CONFIG_FILE,
-      tweaks: tweakState.discovered.filter((t) => isTweakEnabled(t.manifest.id)),
+      tweaks: tweakState.discovered.filter((t) => isTweakEnabledFromState(t.manifest.id, state)),
     });
     if (result.changed) {
       log("info", `synced Codex MCP config: ${result.serverNames.join(", ") || "none"}`);
@@ -891,23 +893,57 @@ async function ensureCodexPlusPlusUpdateCheck(force = false): Promise<CodexPlusP
   return check;
 }
 
-async function ensureTweakUpdateCheck(t: DiscoveredTweak): Promise<void> {
-  const id = t.manifest.id;
-  const repo = t.manifest.githubRepo;
-  const state = readState();
-  const cached = state.tweakUpdateChecks?.[id];
-  if (
-    cached &&
-    cached.repo === repo &&
-    cached.currentVersion === t.manifest.version &&
-    Date.now() - Date.parse(cached.checkedAt) < UPDATE_CHECK_INTERVAL_MS
-  ) {
-    return;
-  }
+const scheduledTweakUpdateCheckIds = new Set<string>();
+let tweakUpdateCheckRunner: Promise<void> | null = null;
 
+function scheduleTweakUpdateChecks(tweaks: DiscoveredTweak[]): void {
+  const state = readState();
+  for (const tweak of tweaks) {
+    if (!isTweakUpdateCheckFresh(tweak, state)) {
+      scheduledTweakUpdateCheckIds.add(tweak.manifest.id);
+    }
+  }
+  if (scheduledTweakUpdateCheckIds.size === 0 || tweakUpdateCheckRunner) return;
+
+  tweakUpdateCheckRunner = runScheduledTweakUpdateChecks()
+    .catch((e) => log("warn", "tweak update check failed:", String((e as Error).message)))
+    .finally(() => {
+      tweakUpdateCheckRunner = null;
+    });
+}
+
+async function runScheduledTweakUpdateChecks(): Promise<void> {
+  while (scheduledTweakUpdateCheckIds.size > 0) {
+    const id = scheduledTweakUpdateCheckIds.values().next().value as string;
+    scheduledTweakUpdateCheckIds.delete(id);
+
+    const tweak = tweakState.discovered.find((candidate) => candidate.manifest.id === id);
+    if (!tweak) continue;
+    if (isTweakUpdateCheckFresh(tweak, readState())) continue;
+
+    const check = await fetchTweakUpdateCheck(tweak);
+    const state = readState();
+    state.tweakUpdateChecks ??= {};
+    state.tweakUpdateChecks[id] = check;
+    writeState(state);
+  }
+}
+
+function isTweakUpdateCheckFresh(t: DiscoveredTweak, state: PersistedState): boolean {
+  const cached = state.tweakUpdateChecks?.[t.manifest.id];
+  return Boolean(
+    cached &&
+      cached.repo === t.manifest.githubRepo &&
+      cached.currentVersion === t.manifest.version &&
+      Date.now() - Date.parse(cached.checkedAt) < UPDATE_CHECK_INTERVAL_MS,
+  );
+}
+
+async function fetchTweakUpdateCheck(t: DiscoveredTweak): Promise<TweakUpdateCheck> {
+  const repo = t.manifest.githubRepo;
   const next = await fetchLatestRelease(repo, t.manifest.version);
   const latestVersion = next.latestTag ? normalizeVersion(next.latestTag) : null;
-  const check: TweakUpdateCheck = {
+  return {
     checkedAt: new Date().toISOString(),
     repo,
     currentVersion: t.manifest.version,
@@ -919,9 +955,6 @@ async function ensureTweakUpdateCheck(t: DiscoveredTweak): Promise<void> {
       : false,
     ...(next.error ? { error: next.error } : {}),
   };
-  state.tweakUpdateChecks ??= {};
-  state.tweakUpdateChecks[id] = check;
-  writeState(state);
 }
 
 async function fetchLatestRelease(
@@ -1102,17 +1135,16 @@ async function installStoreTweak(entry: TweakStoreEntry): Promise<void> {
       redirect: "follow",
     });
     if (!res.ok) throw new Error(`download failed: ${res.status}`);
-    const bytes = Buffer.from(await res.arrayBuffer());
-    writeFileSync(archive, bytes);
-    mkdirSync(extractDir, { recursive: true });
-    extractTarArchive(archive, extractDir);
-    const source = findTweakRoot(extractDir);
+    await writeFetchBodyToFile(res, archive);
+    await mkdir(extractDir, { recursive: true });
+    await extractTarArchive(archive, extractDir);
+    const source = await findTweakRoot(extractDir);
     if (!source) throw new Error("downloaded archive did not contain manifest.json");
     validateStoreTweakSource(entry, source);
-    rmSync(stagedTarget, { recursive: true, force: true });
-    copyTweakSource(source, stagedTarget);
-    const stagedFiles = hashTweakSource(stagedTarget);
-    writeFileSync(
+    await rmAsync(stagedTarget, { recursive: true, force: true });
+    await copyTweakSource(source, stagedTarget);
+    const stagedFiles = await hashTweakSource(stagedTarget);
+    await writeFile(
       join(stagedTarget, ".codexpp-store.json"),
       JSON.stringify(
         {
@@ -1125,12 +1157,13 @@ async function installStoreTweak(entry: TweakStoreEntry): Promise<void> {
         null,
         2,
       ),
+      "utf8",
     );
     await assertStoreTweakCleanForAutoUpdate(entry, target, work);
-    rmSync(target, { recursive: true, force: true });
-    cpSync(stagedTarget, target, { recursive: true });
+    await rmAsync(target, { recursive: true, force: true });
+    await cpAsync(stagedTarget, target, { recursive: true });
   } finally {
-    rmSync(work, { recursive: true, force: true });
+    await rmAsync(work, { recursive: true, force: true });
   }
 }
 
@@ -1197,14 +1230,23 @@ async function fetchManifestAtCommit(repo: string, commitSha: string): Promise<P
   return await res.json() as Partial<TweakManifest>;
 }
 
-function extractTarArchive(archive: string, targetDir: string): void {
-  const result = spawnSync("tar", ["-xzf", archive, "-C", targetDir], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+async function extractTarArchive(archive: string, targetDir: string): Promise<void> {
+  await new Promise<void>((resolvePromise, reject) => {
+    const child = spawn("tar", ["-xzf", archive, "-C", targetDir], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => { stdout += chunk; });
+    child.stderr?.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolvePromise();
+      else reject(new Error(`tar extraction failed: ${stderr || stdout || code}`));
+    });
   });
-  if (result.status !== 0) {
-    throw new Error(`tar extraction failed: ${result.stderr || result.stdout || result.status}`);
-  }
 }
 
 function validateStoreTweakSource(entry: TweakStoreEntry, source: string): void {
@@ -1221,24 +1263,27 @@ function validateStoreTweakSource(entry: TweakStoreEntry, source: string): void 
   }
 }
 
-function findTweakRoot(dir: string): string | null {
-  if (!existsSync(dir)) return null;
-  if (existsSync(join(dir, "manifest.json"))) return dir;
-  for (const name of readdirSync(dir)) {
-    const child = join(dir, name);
-    try {
-      if (!statSync(child).isDirectory()) continue;
-    } catch {
-      continue;
+async function findTweakRoot(dir: string): Promise<string | null> {
+  try {
+    await access(dir);
+    await access(join(dir, "manifest.json"));
+    return dir;
+  } catch {}
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const found = await findTweakRoot(join(dir, entry.name));
+      if (found) return found;
     }
-    const found = findTweakRoot(child);
-    if (found) return found;
+  } catch {
+    return null;
   }
   return null;
 }
 
-function copyTweakSource(source: string, target: string): void {
-  cpSync(source, target, {
+async function copyTweakSource(source: string, target: string): Promise<void> {
+  await cpAsync(source, target, {
     recursive: true,
     filter: (src) => !/(^|[/\\])(?:\.git|node_modules)(?:[/\\]|$)/.test(src),
   });
@@ -1255,7 +1300,7 @@ async function assertStoreTweakCleanForAutoUpdate(
   if (metadata.repo !== entry.repo) {
     throw new StoreTweakModifiedError(entry.manifest.name);
   }
-  const currentFiles = hashTweakSource(target);
+  const currentFiles = await hashTweakSource(target);
   const baselineFiles = metadata.files ?? await fetchBaselineStoreTweakHashes(metadata, work);
   if (!sameFileHashes(currentFiles, baselineFiles)) {
     throw new StoreTweakModifiedError(entry.manifest.name);
@@ -1291,32 +1336,40 @@ async function fetchBaselineStoreTweakHashes(
     redirect: "follow",
   });
   if (!res.ok) throw new Error(`Could not verify local tweak changes before update: ${res.status}`);
-  writeFileSync(archive, Buffer.from(await res.arrayBuffer()));
-  mkdirSync(baselineDir, { recursive: true });
-  extractTarArchive(archive, baselineDir);
-  const source = findTweakRoot(baselineDir);
+  await writeFetchBodyToFile(res, archive);
+  await mkdir(baselineDir, { recursive: true });
+  await extractTarArchive(archive, baselineDir);
+  const source = await findTweakRoot(baselineDir);
   if (!source) throw new Error("Could not verify local tweak changes before update: baseline manifest missing");
   return hashTweakSource(source);
 }
 
-function hashTweakSource(root: string): Record<string, string> {
+async function writeFetchBodyToFile(res: Response, target: string): Promise<void> {
+  if (!res.body) throw new Error("download response did not include a body");
+  await pipeline(
+    Readable.fromWeb(res.body as Parameters<typeof Readable.fromWeb>[0]),
+    createWriteStream(target),
+  );
+}
+
+async function hashTweakSource(root: string): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
-  collectTweakFileHashes(root, root, out);
+  await collectTweakFileHashes(root, root, out);
   return out;
 }
 
-function collectTweakFileHashes(root: string, dir: string, out: Record<string, string>): void {
-  for (const name of readdirSync(dir).sort()) {
-    if (name === ".git" || name === "node_modules" || name === ".codexpp-store.json") continue;
-    const full = join(dir, name);
+async function collectTweakFileHashes(root: string, dir: string, out: Record<string, string>): Promise<void> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === ".codexpp-store.json") continue;
+    const full = join(dir, entry.name);
     const rel = relative(root, full).split("\\").join("/");
-    const stat = statSync(full);
-    if (stat.isDirectory()) {
-      collectTweakFileHashes(root, full, out);
+    if (entry.isDirectory()) {
+      await collectTweakFileHashes(root, full, out);
       continue;
     }
-    if (!stat.isFile()) continue;
-    out[rel] = createHash("sha256").update(readFileSync(full)).digest("hex");
+    if (!entry.isFile()) continue;
+    out[rel] = createHash("sha256").update(await readFile(full)).digest("hex");
   }
 }
 

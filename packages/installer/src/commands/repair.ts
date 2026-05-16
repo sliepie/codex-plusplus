@@ -9,7 +9,7 @@ import { readState, writeState } from "../state.js";
 import { locateCodex } from "../platform.js";
 import { readHeaderHash } from "../asar.js";
 import { CODEX_PLUSPLUS_VERSION, compareSemver } from "../version.js";
-import { installWatcher } from "../watcher.js";
+import { installWatcher, uninstallWatcher } from "../watcher.js";
 import { clearUpdateMode, isUpdateModeFresh, readUpdateMode, writeUpdateMode } from "../update-mode.js";
 import { findSourceRoot } from "../source-root.js";
 import {
@@ -69,7 +69,7 @@ export async function repair(opts: Opts = {}): Promise<void> {
     if (updateMode) {
       const codexVersion = readCodexVersion(codex.metaPath);
       if (codexVersion === updateMode.codexVersion && isUpdateModeFresh(updateMode)) {
-        const watcher = refreshWatcher(state.watcher, codex.appRoot, opts.quiet);
+        const watcher = refreshWatcherForRepair(state.watcher, codex.appRoot, opts);
         writeState(paths.stateFile, { ...state, watcher, sourceRoot });
         if (!updateMode.notifiedAt) {
           showUpdateModePausedAlert(codex.appRoot, codexVersion);
@@ -90,7 +90,7 @@ export async function repair(opts: Opts = {}): Promise<void> {
     }
     const { headerHash } = readHeaderHash(codex.asarPath);
     if (headerHash === state.patchedAsarHash) {
-      const watcher = refreshWatcher(state.watcher, codex.appRoot, opts.quiet);
+      const watcher = refreshWatcherForRepair(state.watcher, codex.appRoot, opts);
       if (compareSemver(CODEX_PLUSPLUS_VERSION, state.version) > 0) {
         if (!isAutoUpdateEnabled(paths.configFile)) {
           if (!opts.quiet) console.log(kleur.yellow("Codex++ auto-update is disabled."));
@@ -305,4 +305,23 @@ function refreshWatcher(
     if (!quiet) console.warn(kleur.yellow(`Watcher refresh failed: ${(e as Error).message}`));
     return previous;
   }
+}
+
+function refreshWatcherForRepair(
+  previous: NonNullable<ReturnType<typeof readState>>["watcher"],
+  appRoot: string,
+  opts: Opts,
+): NonNullable<ReturnType<typeof readState>>["watcher"] {
+  if (process.platform === "win32") {
+    if (previous !== "scheduled-task") return "none";
+    try {
+      uninstallWatcher();
+      return "none";
+    } catch (e) {
+      if (!opts.quiet) console.warn(kleur.yellow(`Legacy scheduled task cleanup failed: ${(e as Error).message}`));
+      return previous;
+    }
+  }
+  if (isWatcherRepair(opts)) return previous;
+  return refreshWatcher(previous, appRoot, opts.quiet);
 }

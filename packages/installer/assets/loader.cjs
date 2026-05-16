@@ -26,6 +26,7 @@ const meta = pkg.__codexpp || {};
 const originalMain = meta.originalMain;
 const userRoot = meta.userRoot;
 const MAX_LOG_BYTES = 10 * 1024 * 1024;
+const LOG_TRIM_TARGET_RATIO = 0.75;
 
 function appendCappedLog(file, line) {
   const incoming = Buffer.from(line);
@@ -38,7 +39,11 @@ function appendCappedLog(file, line) {
     const allowedExisting = MAX_LOG_BYTES - incoming.byteLength;
     if (size > allowedExisting) {
       const existing = fs.readFileSync(file);
-      fs.writeFileSync(file, existing.subarray(Math.max(0, existing.byteLength - allowedExisting)));
+      const targetExisting = Math.max(
+        0,
+        Math.floor(MAX_LOG_BYTES * LOG_TRIM_TARGET_RATIO) - incoming.byteLength,
+      );
+      fs.writeFileSync(file, existing.subarray(Math.max(0, existing.byteLength - targetExisting)));
     }
   }
   fs.appendFileSync(file, incoming);

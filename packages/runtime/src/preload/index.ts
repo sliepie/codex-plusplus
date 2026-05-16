@@ -5,7 +5,7 @@
  *      reference when React mounts. We use this for fiber walking.
  *   2. After DOMContentLoaded, kick off settings-injection logic.
  *   3. Discover renderer-scoped tweaks (via IPC to main) and start them.
- *   4. Listen for `codexpp:tweaks-changed` from main (filesystem watcher) and
+ *   4. Listen for explicit `codexpp:tweaks-changed` broadcasts from main and
  *      hot-reload tweaks without dropping the page.
  */
 
@@ -20,16 +20,26 @@ import { mountManager } from "./manager";
 //
 // Codex's renderer is sandboxed (sandbox: true), so `require("node:fs")` is
 // unavailable. We forward log lines to main via IPC; main writes the file.
-function fileLog(stage: string, extra?: unknown): void {
+function fileLog(stage: string, extra?: unknown, level: "info" | "error" = "info"): void {
+  if (level === "info" && !isPreloadDebugEnabled()) return;
   const msg = `[codex-plusplus preload] ${stage}${
     extra === undefined ? "" : " " + safeStringify(extra)
   }`;
   try {
-    console.error(msg);
+    if (level === "error") console.error(msg);
+    else console.info(msg);
   } catch {}
   try {
-    ipcRenderer.send("codexpp:preload-log", "info", msg);
+    ipcRenderer.send("codexpp:preload-log", level, msg);
   } catch {}
+}
+function isPreloadDebugEnabled(): boolean {
+  try {
+    const debugWindow = window as Window & { __codexppPreloadDebug?: unknown };
+    return debugWindow.__codexppPreloadDebug === true || localStorage.getItem("codexpp:debug-preload") === "1";
+  } catch {
+    return false;
+  }
 }
 function safeStringify(v: unknown): string {
   try {
@@ -46,7 +56,7 @@ try {
   installReactHook();
   fileLog("react hook installed");
 } catch (e) {
-  fileLog("react hook FAILED", String(e));
+  fileLog("react hook FAILED", String(e), "error");
 }
 
 queueMicrotask(() => {
@@ -62,14 +72,14 @@ async function boot() {
   try {
     startSettingsInjector();
     fileLog("settings injector started");
-    await startTweakHost();
+    const snapshot = await startTweakHost();
     fileLog("tweak host started");
-    await mountManager();
+    await mountManager(snapshot);
     fileLog("manager mounted");
     subscribeReload();
     fileLog("boot complete");
   } catch (e) {
-    fileLog("boot FAILED", String((e as Error)?.stack ?? e));
+    fileLog("boot FAILED", String((e as Error)?.stack ?? e), "error");
     console.error("[codex-plusplus] preload boot failed:", e);
   }
 }
@@ -82,11 +92,12 @@ function subscribeReload(): void {
     if (reloading) return;
     reloading = (async () => {
       try {
-        console.info("[codex-plusplus] hot-reloading tweaks");
+        fileLog("hot reload start");
         teardownTweakHost();
-        await startTweakHost();
-        await mountManager();
+        const snapshot = await startTweakHost();
+        await mountManager(snapshot);
       } catch (e) {
+        fileLog("hot reload FAILED", String((e as Error)?.stack ?? e), "error");
         console.error("[codex-plusplus] hot reload failed:", e);
       } finally {
         reloading = null;

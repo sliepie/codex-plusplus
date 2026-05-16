@@ -8,13 +8,14 @@
  */
 import { ipcRenderer } from "electron";
 import { registerSection } from "./settings-injector";
+import type { TweakHostStartupSnapshot } from "./tweak-host";
 
-export async function mountManager(): Promise<void> {
-  const tweaks = (await ipcRenderer.invoke("codexpp:list-tweaks")) as Array<{
+export async function mountManager(snapshot?: TweakHostStartupSnapshot): Promise<void> {
+  const tweaks = snapshot?.tweaks ?? (await ipcRenderer.invoke("codexpp:list-tweaks")) as Array<{
     manifest: { id: string; name: string; version: string; description?: string };
     entryExists: boolean;
   }>;
-  const paths = (await ipcRenderer.invoke("codexpp:user-paths")) as {
+  const paths = snapshot?.paths ?? (await ipcRenderer.invoke("codexpp:user-paths")) as {
     userRoot: string;
     tweaksDir: string;
     logDir: string;

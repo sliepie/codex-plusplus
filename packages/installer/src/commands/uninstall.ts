@@ -63,9 +63,12 @@ export async function uninstall(opts: Opts = {}): Promise<void> {
     console.log(kleur.green("Re-signed restored bundle."));
   }
 
-  uninstallWatcher();
+  const shouldRemoveWatcher = codex.platform !== "win32" || state?.watcher === "scheduled-task";
+  if (shouldRemoveWatcher) {
+    uninstallWatcher();
+    console.log(kleur.green("Removed watcher."));
+  }
   cleanupWindowsManagedArtifacts();
-  console.log(kleur.green("Removed watcher."));
 
   // Don't delete user tweaks/config — only installer state + runtime.
   cleanupRuntimeAndState(paths);

@@ -179,15 +179,19 @@ function locateWin(override?: string): CodexInstall {
       ...windowsCodexCandidates(programFilesX86),
     );
   }
-  const storeInstalls = findWindowsStoreCodexInstalls();
-  for (const storeInstall of storeInstalls) {
-    if (storeInstall.installLocation) {
-      candidates.push(...windowsStoreCodexCandidates(storeInstall.installLocation));
+  let storeInstalls: ReturnType<typeof findWindowsStoreCodexInstalls> = [];
+  let tried = unique(candidates);
+  let appRoot = tried.find(isWinCodexRoot);
+  if (!appRoot) {
+    storeInstalls = findWindowsStoreCodexInstalls();
+    for (const storeInstall of storeInstalls) {
+      if (storeInstall.installLocation) {
+        candidates.push(...windowsStoreCodexCandidates(storeInstall.installLocation));
+      }
     }
+    tried = unique(candidates);
+    appRoot = tried.find(isWinCodexRoot);
   }
-
-  const tried = unique(candidates);
-  const appRoot = tried.find(isWinCodexRoot);
   if (!appRoot) {
     const triedText = tried.length > 0 ? tried.join("\n  ") : "(no default locations available)";
     if (storeInstalls.length > 0) {

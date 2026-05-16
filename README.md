@@ -62,10 +62,12 @@ That's it. The installer:
 4. Recomputes the asar header SHA-256 and writes it into `Info.plist` (`ElectronAsarIntegrity`).
 5. Flips `EnableEmbeddedAsarIntegrityValidation` in the Electron Framework binary as a belt-and-suspenders.
 6. Re-signs the app on macOS with a stable per-machine "Codex++ Local Signing" identity, creating it in the user keychain if needed.
-7. Installs a launch agent / login item that detects app updates and re-runs `repair --quiet`.
+7. Installs a launch agent / systemd watcher on macOS/Linux that detects app updates and re-runs `repair --quiet`.
 8. Installs the default tweak set from their latest GitHub releases unless `--no-default-tweaks` is passed.
 
-The watcher also runs hourly through the GitHub-installed local CLI. If a newer Codex++ GitHub release is available, it downloads the release, rebuilds the local CLI/runtime, and runs `repair` so the runtime in your user directory is refreshed without replacing tweak code. You can turn this off from Settings → Codex Plus Plus → Config.
+On Windows, Codex++ uses the bundled managed app copy and does not install Task Scheduler jobs.
+
+On macOS/Linux, the watcher also runs hourly through the GitHub-installed local CLI. If a newer Codex++ GitHub release is available, it downloads the release, rebuilds the local CLI/runtime, and runs `repair` so the runtime in your user directory is refreshed without replacing tweak code. You can turn this off from Settings → Codex Plus Plus → Config.
 
 After source-bootstrap install, the installer adds `codexplusplus` and `codex-plusplus`
 to a writable PATH directory when possible. Use `codexplusplus` for day-to-day commands:
@@ -187,7 +189,7 @@ See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for details.
 
 ## Legal
 
-This is an unofficial project. Not affiliated with OpenAI. Modifying Codex.app violates its code signature; on macOS you may need to allow the re-signed app on first launch. Auto-updates from Sparkle overwrite the patch, so `codex-plusplus` installs a watcher that re-applies it.
+This is an unofficial project. Not affiliated with OpenAI. Modifying Codex.app violates its code signature; on macOS you may need to allow the re-signed app on first launch. Auto-updates from Sparkle overwrite the patch, so `codex-plusplus` installs a macOS watcher that re-applies it.
 
 Use at your own risk.
 

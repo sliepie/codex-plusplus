@@ -5,9 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { analyzeWatcherLogTail, getWatcherHealth } from "../src/watcher-health";
 
-test("watcher health reports missing install state as not ready", () => {
-  withTempDir((root) => {
-    const health = getWatcherHealth(root);
+test("watcher health reports missing install state as not ready", async () => {
+  await withTempDir(async (root) => {
+    const health = await getWatcherHealth(root);
 
     assert.equal(health.status, "error");
     assert.equal(health.watcher, "none");
@@ -16,8 +16,8 @@ test("watcher health reports missing install state as not ready", () => {
   });
 });
 
-test("watcher health warns when automatic refresh is disabled", () => {
-  withTempDir((root) => {
+test("watcher health warns when automatic refresh is disabled", async () => {
+  await withTempDir(async (root) => {
     writeFileSync(
       join(root, "state.json"),
       JSON.stringify({ version: "0.1.2", watcher: "none", appRoot: "/missing" }),
@@ -27,7 +27,7 @@ test("watcher health warns when automatic refresh is disabled", () => {
       JSON.stringify({ codexPlusPlus: { autoUpdate: false } }),
     );
 
-    const health = getWatcherHealth(root);
+    const health = await getWatcherHealth(root);
 
     assert.equal(
       health.checks.find((check) => check.name === "Automatic refresh")?.status,
@@ -35,7 +35,7 @@ test("watcher health warns when automatic refresh is disabled", () => {
     );
     assert.equal(
       health.checks.find((check) => check.name === "Watcher kind")?.status,
-      "error",
+      process.platform === "win32" ? "ok" : "error",
     );
   });
 });
@@ -55,10 +55,10 @@ Fix:
   assert.equal(check.detail, "auto-repair needs app permissions; run `codexplusplus repair` from Terminal");
 });
 
-function withTempDir(fn: (root: string) => void): void {
+async function withTempDir(fn: (root: string) => void | Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "codexpp-watcher-health-"));
   try {
-    fn(root);
+    await fn(root);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
