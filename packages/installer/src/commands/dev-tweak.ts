@@ -117,7 +117,7 @@ function touchReloadMarker(linkPath: string): void {
   try {
     writeFileSync(join(linkPath, ".codexpp-dev-reload"), String(Date.now()), "utf8");
   } catch {
-    // Best effort only. Creating the symlink itself usually wakes the runtime watcher.
+    // Best effort only; explicit runtime reloads do not depend on this marker.
   }
 }
 

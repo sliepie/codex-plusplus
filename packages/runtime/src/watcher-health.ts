@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
@@ -43,7 +43,7 @@ interface SelfUpdateState {
 const LAUNCHD_LABEL = "com.codexplusplus.watcher";
 const WATCHER_LOG = join(homedir(), "Library", "Logs", "codex-plusplus-watcher.log");
 
-export function getWatcherHealth(userRoot: string): WatcherHealth {
+export async function getWatcherHealth(userRoot: string): Promise<WatcherHealth> {
   const checks: WatcherHealthCheck[] = [];
   const state = readJson<InstallerState>(join(userRoot, "state.json"));
   const config = readJson<RuntimeConfig>(join(userRoot, "config.json")) ?? {};
@@ -64,10 +64,11 @@ export function getWatcherHealth(userRoot: string): WatcherHealth {
     detail: autoUpdate ? "enabled" : "disabled in Codex++ config",
   });
 
+  const windowsBundledApp = platform() === "win32";
   checks.push({
     name: "Watcher kind",
-    status: state.watcher && state.watcher !== "none" ? "ok" : "error",
-    detail: state.watcher ?? "none",
+    status: windowsBundledApp || (state.watcher && state.watcher !== "none") ? "ok" : "error",
+    detail: windowsBundledApp ? "not needed on Windows bundled app" : state.watcher ?? "none",
   });
 
   if (selfUpdate) {
@@ -83,13 +84,17 @@ export function getWatcherHealth(userRoot: string): WatcherHealth {
 
   switch (platform()) {
     case "darwin":
-      checks.push(...checkLaunchdWatcher(appRoot));
+      checks.push(...await checkLaunchdWatcher(appRoot));
       break;
     case "linux":
-      checks.push(...checkSystemdWatcher(appRoot));
+      checks.push(...await checkSystemdWatcher(appRoot));
       break;
     case "win32":
-      checks.push(...checkScheduledTaskWatcher());
+      checks.push({
+        name: "Windows auto-repair",
+        status: "ok",
+        detail: "not installed; Codex++ launches the bundled managed app directly",
+      });
       break;
     default:
       checks.push({
@@ -123,7 +128,7 @@ function selfUpdateCheck(state: SelfUpdateState): WatcherHealthCheck {
   return { name: "last Codex++ update", status: "warn", detail: `checking since ${at}` };
 }
 
-function checkLaunchdWatcher(appRoot: string): WatcherHealthCheck[] {
+async function checkLaunchdWatcher(appRoot: string): Promise<WatcherHealthCheck[]> {
   const checks: WatcherHealthCheck[] = [];
   const plistPath = join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
   const plist = existsSync(plistPath) ? readFileSafe(plistPath) : "";
@@ -164,7 +169,7 @@ function checkLaunchdWatcher(appRoot: string): WatcherHealthCheck[] {
     }
   }
 
-  const loaded = commandSucceeds("launchctl", ["list", LAUNCHD_LABEL]);
+  const loaded = await commandSucceeds("launchctl", ["list", LAUNCHD_LABEL]);
   checks.push({
     name: "launchd loaded",
     status: loaded ? "ok" : "error",
@@ -175,13 +180,18 @@ function checkLaunchdWatcher(appRoot: string): WatcherHealthCheck[] {
   return checks;
 }
 
-function checkSystemdWatcher(appRoot: string): WatcherHealthCheck[] {
+async function checkSystemdWatcher(appRoot: string): Promise<WatcherHealthCheck[]> {
   const dir = join(homedir(), ".config", "systemd", "user");
   const service = join(dir, "codex-plusplus-watcher.service");
   const timer = join(dir, "codex-plusplus-watcher.timer");
   const pathUnit = join(dir, "codex-plusplus-watcher.path");
   const expectedPath = appRoot ? join(appRoot, "resources", "app.asar") : "";
   const pathBody = existsSync(pathUnit) ? readFileSafe(pathUnit) : "";
+
+  const [pathActive, timerActive] = await Promise.all([
+    commandSucceeds("systemctl", ["--user", "is-active", "--quiet", "codex-plusplus-watcher.path"]),
+    commandSucceeds("systemctl", ["--user", "is-active", "--quiet", "codex-plusplus-watcher.timer"]),
+  ]);
 
   return [
     {
@@ -201,28 +211,13 @@ function checkSystemdWatcher(appRoot: string): WatcherHealthCheck[] {
     },
     {
       name: "path unit active",
-      status: commandSucceeds("systemctl", ["--user", "is-active", "--quiet", "codex-plusplus-watcher.path"]) ? "ok" : "warn",
+      status: pathActive ? "ok" : "warn",
       detail: "systemctl --user is-active codex-plusplus-watcher.path",
     },
     {
       name: "timer active",
-      status: commandSucceeds("systemctl", ["--user", "is-active", "--quiet", "codex-plusplus-watcher.timer"]) ? "ok" : "warn",
+      status: timerActive ? "ok" : "warn",
       detail: "systemctl --user is-active codex-plusplus-watcher.timer",
-    },
-  ];
-}
-
-function checkScheduledTaskWatcher(): WatcherHealthCheck[] {
-  return [
-    {
-      name: "logon task",
-      status: commandSucceeds("schtasks.exe", ["/Query", "/TN", "codex-plusplus-watcher"]) ? "ok" : "error",
-      detail: "codex-plusplus-watcher",
-    },
-    {
-      name: "hourly task",
-      status: commandSucceeds("schtasks.exe", ["/Query", "/TN", "codex-plusplus-watcher-hourly"]) ? "ok" : "warn",
-      detail: "codex-plusplus-watcher-hourly",
     },
   ];
 }
@@ -278,13 +273,12 @@ function summarize(watcher: string, checks: WatcherHealthCheck[]): WatcherHealth
   };
 }
 
-function commandSucceeds(command: string, args: string[]): boolean {
-  try {
-    execFileSync(command, args, { stdio: "ignore", timeout: 5_000 });
-    return true;
-  } catch {
-    return false;
-  }
+function commandSucceeds(command: string, args: string[]): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(command, args, { timeout: 2_000, windowsHide: true }, (error) => {
+      resolve(!error);
+    });
+  });
 }
 
 function commandSummary(plist: string): string {

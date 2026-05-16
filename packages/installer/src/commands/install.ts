@@ -11,8 +11,8 @@ import { setIntegrity, getIntegrity } from "../integrity.js";
 import { writeFuse } from "../fuses.js";
 import { clearQuarantine, prepareCodeSigning, signCodexApp, signatureInfo } from "../codesign.js";
 import { readPlist } from "../plist.js";
-import { writeState } from "../state.js";
-import { installWatcher, type WatcherKind } from "../watcher.js";
+import { readState, writeState } from "../state.js";
+import { installWatcher, uninstallWatcher, type WatcherKind } from "../watcher.js";
 import { CODEX_PLUSPLUS_VERSION } from "../version.js";
 import { installDefaultTweaks } from "../default-tweaks.js";
 import { formatCliShimResult, installCliShims } from "../cli-shim.js";
@@ -44,7 +44,6 @@ export async function install(opts: Opts = {}): Promise<void> {
   const fuseFlip = opts.fuse !== false;
   const resign = opts.resign !== false;
   let localSigning = opts.localSigning === true;
-  const wantWatcher = opts.watcher !== false;
   const wantDefaultTweaks = opts.defaultTweaks !== false;
 
   const step = makeStepper(opts.quiet === true);
@@ -78,6 +77,7 @@ export async function install(opts: Opts = {}): Promise<void> {
   step(`Codex channel: ${kleur.cyan(codex.channel)}`);
 
   const paths = ensureUserPaths();
+  const previousState = readState(paths.stateFile);
   step(`User dir: ${kleur.cyan(paths.root)}`);
   step(formatCliShimResult(installCliShims(paths.binDir)));
   const launcher = installWindowsManagedAppLauncher(codex);
@@ -157,7 +157,10 @@ export async function install(opts: Opts = {}): Promise<void> {
 
   // 7. Auto-repair watcher.
   let watcher: WatcherKind = opts.watcherKind ?? "none";
-  if (wantWatcher) {
+  if (codex.platform === "win32") {
+    if (previousState?.watcher === "scheduled-task") uninstallWatcher();
+    watcher = "none";
+  } else if (opts.watcher !== false) {
     try {
       watcher = installWatcher(codex.appRoot);
       step(`Installed watcher (${watcher})`);

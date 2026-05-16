@@ -116,7 +116,7 @@ prog
   .option("--resign", "Code sign Codex.app on macOS", true)
   .option("--local", "Use a stable local signing identity on macOS")
   .option("--local-signing", "Alias for --local")
-  .option("--watcher", "Install the auto-repair watcher", true)
+  .option("--watcher", "Install the auto-repair watcher on macOS/Linux", true)
   .option("--default-tweaks", "Install the default tweak set from latest GitHub releases", true)
   .action(wrap(runInstall));
 

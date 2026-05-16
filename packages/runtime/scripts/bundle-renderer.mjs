@@ -19,7 +19,8 @@ await build({
   target: "es2022",
   format: "cjs",
   external: ["electron"],
-  sourcemap: "inline",
+  sourcemap: false,
+  sourcesContent: false,
   minify: false,
   logLevel: "info",
 });
@@ -32,13 +33,10 @@ await build({
   target: "node20",
   format: "cjs",
   external: ["electron"],
-  sourcemap: "inline",
+  sourcemap: false,
+  sourcesContent: false,
   minify: false,
   logLevel: "info",
-  // chokidar uses dynamic native fsevents on macOS via optional dep; let
-  // esbuild treat any failure to resolve as an empty module so we degrade
-  // gracefully to polling on platforms without it. (chokidar v4 already
-  // handles missing fsevents internally — this is just future-proofing.)
 });
 
 console.log("[bundle] preload + main bundled");

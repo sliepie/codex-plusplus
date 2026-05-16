@@ -85,16 +85,14 @@ test("bundled lifecycle reload helper uses the full main reload sequence", () =>
   assertCallOrder(body, fullReloadSequence);
 });
 
-test("source filesystem watcher reload delegates to lifecycle helper", () => {
-  const body = extractFunctionBody(runtimeSource, "scheduleReload");
-
-  assertCallOrder(body, ["reloadTweaks"]);
+test("runtime source does not start a filesystem watcher", () => {
+  assert.doesNotMatch(runtimeSource, /chokidar/);
+  assert.doesNotMatch(runtimeSource, /watch\(TWEAKS_DIR/);
 });
 
-test("bundled filesystem watcher reload delegates to lifecycle helper", () => {
-  const body = extractFunctionBody(bundledRuntime, "scheduleReload");
-
-  assertCallOrder(body, ["reloadTweaks"]);
+test("bundled runtime does not include filesystem watcher code", () => {
+  assert.doesNotMatch(bundledRuntime, /chokidar/);
+  assert.doesNotMatch(bundledRuntime, /watch\(TWEAKS_DIR/);
 });
 
 function extractHandlerBody(source: string, channel: string): string {

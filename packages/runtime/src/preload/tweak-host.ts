@@ -47,10 +47,35 @@ interface UserPaths {
   logDir: string;
 }
 
+export interface TweakHostStartupSnapshot {
+  tweaks: ListedTweak[];
+  paths: UserPaths;
+}
+
 const loaded = new Map<string, { stop?: () => void }>();
 let cachedPaths: UserPaths | null = null;
 
-export async function startTweakHost(): Promise<void> {
+function isPreloadDebugEnabled(): boolean {
+  try {
+    const debugWindow = window as Window & { __codexppPreloadDebug?: unknown };
+    return debugWindow.__codexppPreloadDebug === true || localStorage.getItem("codexpp:debug-preload") === "1";
+  } catch {
+    return false;
+  }
+}
+
+function shouldMirrorPreloadLog(level: "debug" | "info" | "warn" | "error"): boolean {
+  return level === "warn" || level === "error" || isPreloadDebugEnabled();
+}
+
+function sendPreloadLog(level: "debug" | "info" | "warn" | "error", msg: string): void {
+  if (!shouldMirrorPreloadLog(level)) return;
+  try {
+    ipcRenderer.send("codexpp:preload-log", level, msg);
+  } catch {}
+}
+
+export async function startTweakHost(): Promise<TweakHostStartupSnapshot> {
   const tweaks = (await ipcRenderer.invoke("codexpp:list-tweaks")) as ListedTweak[];
   const paths = (await ipcRenderer.invoke("codexpp:user-paths")) as UserPaths;
   cachedPaths = paths;
@@ -70,25 +95,25 @@ export async function startTweakHost(): Promise<void> {
       await loadTweak(t, paths);
     } catch (e) {
       console.error("[codex-plusplus] tweak load failed:", t.manifest.id, e);
-      try {
-        ipcRenderer.send(
-          "codexpp:preload-log",
-          "error",
-          "tweak load failed: " + t.manifest.id + ": " + String((e as Error)?.stack ?? e),
-        );
-      } catch {}
+      sendPreloadLog(
+        "error",
+        "tweak load failed: " + t.manifest.id + ": " + String((e as Error)?.stack ?? e),
+      );
     }
   }
 
-  console.info(
-    `[codex-plusplus] renderer host loaded ${loaded.size} tweak(s):`,
-    [...loaded.keys()].join(", ") || "(none)",
-  );
-  ipcRenderer.send(
-    "codexpp:preload-log",
-    "info",
-    `renderer host loaded ${loaded.size} tweak(s): ${[...loaded.keys()].join(", ") || "(none)"}`,
-  );
+  if (isPreloadDebugEnabled()) {
+    console.info(
+      `[codex-plusplus] renderer host loaded ${loaded.size} tweak(s):`,
+      [...loaded.keys()].join(", ") || "(none)",
+    );
+    sendPreloadLog(
+      "info",
+      `renderer host loaded ${loaded.size} tweak(s): ${[...loaded.keys()].join(", ") || "(none)"}`,
+    );
+  }
+
+  return { tweaks, paths };
 }
 
 /**
@@ -140,6 +165,7 @@ async function loadTweak(t: ListedTweak, paths: UserPaths): Promise<void> {
 function makeRendererApi(manifest: TweakManifest, paths: UserPaths): TweakApi {
   const id = manifest.id;
   const log = (level: "debug" | "info" | "warn" | "error", ...a: unknown[]) => {
+    if (!shouldMirrorPreloadLog(level)) return;
     const consoleFn =
       level === "debug" ? console.debug
       : level === "warn" ? console.warn
@@ -154,11 +180,7 @@ function makeRendererApi(manifest: TweakManifest, paths: UserPaths): TweakApi {
         if (v instanceof Error) return `${v.name}: ${v.message}`;
         try { return JSON.stringify(v); } catch { return String(v); }
       });
-      ipcRenderer.send(
-        "codexpp:preload-log",
-        level,
-        `[tweak ${id}] ${parts.join(" ")}`,
-      );
+      sendPreloadLog(level, "[tweak " + id + "] " + parts.join(" "));
     } catch {
       /* swallow — never let logging break a tweak */
     }
@@ -194,15 +216,16 @@ function makeRendererApi(manifest: TweakManifest, paths: UserPaths): TweakApi {
         new Promise((resolve, reject) => {
           const existing = document.querySelector(sel);
           if (existing) return resolve(existing);
-          const deadline = Date.now() + timeoutMs;
+          const timeout = window.setTimeout(() => {
+            obs.disconnect();
+            reject(new Error("timeout waiting for " + sel));
+          }, timeoutMs);
           const obs = new MutationObserver(() => {
             const el = document.querySelector(sel);
             if (el) {
+              window.clearTimeout(timeout);
               obs.disconnect();
               resolve(el);
-            } else if (Date.now() > deadline) {
-              obs.disconnect();
-              reject(new Error(`timeout waiting for ${sel}`));
             }
           });
           obs.observe(document.documentElement, { childList: true, subtree: true });
@@ -234,7 +257,10 @@ function rendererStorage(id: string) {
   const write = (v: Record<string, unknown>) =>
     localStorage.setItem(key, JSON.stringify(v));
   return {
-    get: <T>(k: string, d?: T) => (k in read() ? (read()[k] as T) : (d as T)),
+    get: <T>(k: string, d?: T) => {
+      const values = read();
+      return k in values ? (values[k] as T) : (d as T);
+    },
     set: (k: string, v: unknown) => {
       const o = read();
       o[k] = v;

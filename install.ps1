@@ -16,6 +16,42 @@ function Require-Command($Command, $Message) {
   }
 }
 
+function Reset-WorkspaceLink($Root, $PackageName, $TargetRelative) {
+  $NodeModules = Join-Path $Root "node_modules"
+  $Target = Join-Path $Root $TargetRelative
+  if (-not (Test-Path -LiteralPath $Target)) {
+    Fail "Workspace package target was not found: $TargetRelative"
+  }
+
+  $Slash = $PackageName.IndexOf("/")
+  if ($Slash -ge 0) {
+    $Scope = $PackageName.Substring(0, $Slash)
+    $Name = $PackageName.Substring($Slash + 1)
+    $ScopeDir = Join-Path $NodeModules $Scope
+    New-Item -ItemType Directory -Force -Path $ScopeDir | Out-Null
+    $Link = Join-Path $ScopeDir $Name
+  } else {
+    $Link = Join-Path $NodeModules $PackageName
+  }
+
+  $Existing = Get-Item -LiteralPath $Link -Force -ErrorAction SilentlyContinue
+  if ($Existing) {
+    if (($Existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+      $Existing.Delete()
+    } else {
+      Remove-Item -LiteralPath $Link -Recurse -Force
+    }
+  }
+  New-Item -ItemType Junction -Path $Link -Target $Target | Out-Null
+}
+
+function Repair-WorkspaceLinks($Root) {
+  Reset-WorkspaceLink $Root "codex-plusplus" "packages\installer"
+  Reset-WorkspaceLink $Root "@codex-plusplus/loader" "packages\loader"
+  Reset-WorkspaceLink $Root "@codex-plusplus/runtime" "packages\runtime"
+  Reset-WorkspaceLink $Root "@codex-plusplus/sdk" "packages\sdk"
+}
+
 Require-Command node "Node.js 20+ is required but node was not found."
 Require-Command npm.cmd "npm is required to build codex-plusplus from GitHub source."
 
@@ -99,15 +135,7 @@ try {
   Move-Item -Path $Next -Destination $InstallDir
 
   Write-Host "Finalizing workspace links..."
-  Push-Location $InstallDir
-  try {
-    & npm.cmd install --workspaces --include-workspace-root --ignore-scripts
-    if ($LASTEXITCODE -ne 0) {
-      Fail "npm install failed while finalizing codex-plusplus workspace links."
-    }
-  } finally {
-    Pop-Location
-  }
+  Repair-WorkspaceLinks $InstallDir
 
   Write-Host "Running installer..."
   & node (Join-Path $InstallDir "packages\installer\dist\cli.js") install @args

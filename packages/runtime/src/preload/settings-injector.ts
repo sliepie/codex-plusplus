@@ -184,6 +184,7 @@ interface InjectorState {
   pagesGroupKey: string | null;
   panelHost: HTMLElement | null;
   observer: MutationObserver | null;
+  probeScheduled: boolean;
   fingerprint: string | null;
   sidebarDumped: boolean;
   activePage: ActivePage | null;
@@ -208,6 +209,7 @@ const state: InjectorState = {
   pagesGroupKey: null,
   panelHost: null,
   observer: null,
+  probeScheduled: false,
   fingerprint: null,
   sidebarDumped: false,
   activePage: null,
@@ -221,6 +223,7 @@ const state: InjectorState = {
 };
 
 function plog(msg: string, extra?: unknown): void {
+  if (!isDomProbeDebugEnabled()) return;
   ipcRenderer.send(
     "codexpp:preload-log",
     "info",
@@ -240,10 +243,7 @@ function safeStringify(v: unknown): string {
 export function startSettingsInjector(): void {
   if (state.observer) return;
 
-  const obs = new MutationObserver(() => {
-    tryInject();
-    maybeDumpDom();
-  });
+  const obs = new MutationObserver((mutations) => scheduleInjectionProbe(mutations));
   obs.observe(document.documentElement, { childList: true, subtree: true });
   state.observer = obs;
 
@@ -260,21 +260,87 @@ export function startSettingsInjector(): void {
     window.addEventListener(`codexpp-${m}`, onNav);
   }
 
-  tryInject();
-  maybeDumpDom();
-  let ticks = 0;
-  const interval = setInterval(() => {
-    ticks++;
-    tryInject();
-    maybeDumpDom();
-    if (ticks > 60) clearInterval(interval);
-  }, 500);
+  runInjectionProbe();
+  for (const delayMs of [250, 1000, 2500]) {
+    setTimeout(runInjectionProbe, delayMs);
+  }
 }
 
 function onNav(): void {
   state.fingerprint = null;
+  state.sidebarRoot = null;
+  runInjectionProbe();
+}
+
+function runInjectionProbe(): void {
   tryInject();
   maybeDumpDom();
+}
+
+function scheduleInjectionProbe(mutations: MutationRecord[]): void {
+  if (!shouldInspectMutations(mutations)) return;
+  if (state.probeScheduled) return;
+
+  state.probeScheduled = true;
+  requestAnimationFrame(() => {
+    state.probeScheduled = false;
+    runInjectionProbe();
+  });
+}
+
+function shouldInspectMutations(mutations: MutationRecord[]): boolean {
+  const root = liveSettingsSurfaceRoot();
+  if (root) return mutations.some((mutation) => mutationTouchesSettingsSurface(mutation, root));
+  if (state.settingsSurfaceVisible || state.navGroup || state.sidebarRoot) {
+    setSettingsSurfaceVisible(false, "settings-root-disconnected");
+  }
+
+  for (const mutation of mutations) {
+    if (isSettingsProbeSurface(mutation.target)) return true;
+    for (const node of Array.from(mutation.addedNodes)) {
+      if (isSettingsProbeSurface(node)) return true;
+    }
+  }
+  return false;
+}
+
+function liveSettingsSurfaceRoot(): HTMLElement | null {
+  if (state.sidebarRoot?.isConnected) return state.sidebarRoot;
+  if (state.navGroup?.isConnected) return state.navGroup;
+  return null;
+}
+
+function mutationTouchesSettingsSurface(mutation: MutationRecord, root: HTMLElement): boolean {
+  if (nodeTouchesSettingsSurface(mutation.target, root)) return true;
+  for (const node of Array.from(mutation.addedNodes)) {
+    if (nodeTouchesSettingsSurface(node, root)) return true;
+  }
+  for (const node of Array.from(mutation.removedNodes)) {
+    if (nodeTouchesSettingsSurface(node, root)) return true;
+  }
+  return false;
+}
+
+function nodeTouchesSettingsSurface(node: Node, root: HTMLElement): boolean {
+  return node === root || root.contains(node) || node.contains(root);
+}
+
+function isSettingsProbeSurface(node: Node): boolean {
+  if (!(node instanceof Element)) return false;
+  const el = node instanceof HTMLElement ? node : node.parentElement;
+  if (!el) return false;
+  if (el.matches("aside,nav,[role='navigation']")) return true;
+  if (el.closest("aside,nav,[role='navigation']")) return true;
+  return el.querySelector("aside,nav,[role='navigation']") !== null;
+}
+
+function isDomProbeDebugEnabled(): boolean {
+  try {
+    const debugWindow = window as Window & { __codexppDebugDom?: unknown };
+    return debugWindow.__codexppDebugDom === true || localStorage.getItem("codexpp:debug-dom") === "1";
+  } catch {
+    return false;
+  }
 }
 
 function onDocumentClick(e: MouseEvent): void {
@@ -369,10 +435,10 @@ export function setListedTweaks(list: ListedTweak[]): void {
 function tryInject(): void {
   removeMisplacedSettingsGroups();
 
-  const itemsGroup = findSidebarItemsGroup();
+  const itemsGroup = getSidebarItemsGroup();
   if (!itemsGroup) {
     scheduleSettingsSurfaceHidden();
-    plog("sidebar not found");
+    if (isDomProbeDebugEnabled()) plog("sidebar not found");
     return;
   }
   if (state.settingsSurfaceHideTimer) {
@@ -386,10 +452,12 @@ function tryInject(): void {
   const outer = itemsGroup.parentElement ?? itemsGroup;
   if (!isSettingsSidebarCandidate(itemsGroup) || !isSettingsSidebarCandidate(outer)) {
     scheduleSettingsSurfaceHidden();
-    plog("rejected non-settings sidebar candidate", {
-      itemsGroup: describe(itemsGroup),
-      outer: describe(outer),
-    });
+    if (isDomProbeDebugEnabled()) {
+      plog("rejected non-settings sidebar candidate", {
+        itemsGroup: describe(itemsGroup),
+        outer: describe(outer),
+      });
+    }
     return;
   }
   state.sidebarRoot = outer;
@@ -470,6 +538,14 @@ function tryInject(): void {
   state.navButtons = { config: configBtn, tweaks: tweaksBtn, store: storeBtn };
   plog("nav group injected", { outerTag: outer.tagName });
   syncPagesGroup();
+}
+
+function getSidebarItemsGroup(): HTMLElement | null {
+  const cached = state.sidebarRoot;
+  if (cached?.isConnected && isSettingsSidebarCandidate(cached)) return cached;
+
+  state.sidebarRoot = null;
+  return findSidebarItemsGroup();
 }
 
 function syncNativeSettingsHeader(itemsGroup: HTMLElement, outer: HTMLElement): void {
@@ -625,7 +701,7 @@ function codexPpVisibleBox(el: HTMLElement): DOMRect | null {
 function setSettingsSurfaceVisible(visible: boolean, reason: string): void {
   if (state.settingsSurfaceVisible === visible) return;
   state.settingsSurfaceVisible = visible;
-  if (visible) warmTweakStore();
+  if (!visible) clearSettingsSurfaceRefs();
   try {
     (window as Window & { __codexppSettingsSurfaceVisible?: boolean }).__codexppSettingsSurfaceVisible = visible;
     document.documentElement.dataset.codexppSettingsSurface = visible ? "true" : "false";
@@ -636,6 +712,22 @@ function setSettingsSurfaceVisible(visible: boolean, reason: string): void {
     );
   } catch {}
   plog("settings surface", { visible, reason, url: location.href });
+}
+
+function clearSettingsSurfaceRefs(): void {
+  if (state.sidebarRoot && state.sidebarRestoreHandler) {
+    state.sidebarRoot.removeEventListener("click", state.sidebarRestoreHandler, true);
+  }
+  state.outerWrapper = null;
+  state.nativeNavHeader = null;
+  state.navGroup = null;
+  state.navButtons = null;
+  state.pagesGroup = null;
+  state.pagesGroupKey = null;
+  state.panelHost = null;
+  state.sidebarRoot = null;
+  state.sidebarRestoreHandler = null;
+  for (const page of state.pages.values()) page.navButton = null;
 }
 
 /**
@@ -2911,6 +3003,8 @@ function findContentArea(): HTMLElement | null {
 }
 
 function maybeDumpDom(): void {
+  if (!isDomProbeDebugEnabled()) return;
+
   try {
     const sidebar = findSidebarItemsGroup();
     if (sidebar && !state.sidebarDumped) {

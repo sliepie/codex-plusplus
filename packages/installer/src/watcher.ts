@@ -7,7 +7,8 @@
  * Implementation per OS:
  *   macOS:   ~/Library/LaunchAgents/com.codexplusplus.watcher.plist (launchd)
  *   Linux:   ~/.config/systemd/user/codex-plusplus-watcher.service (systemd --user)
- *   Windows: Task Scheduler entry via schtasks.exe
+ *   Windows: no watcher; the installed Codex++ launcher uses the bundled,
+ *            writable app copy directly.
  *
  * The watcher itself is just `codex-plusplus repair --quiet` triggered on the
  * relevant event (app launch / login). The simplest cross-platform approach
@@ -30,7 +31,7 @@ export function installWatcher(appRoot: string): WatcherKind {
     case "linux":
       return installSystemd(appRoot);
     case "win32":
-      return installScheduledTask(appRoot);
+      return "none";
     default:
       return "none";
   }
@@ -237,41 +238,6 @@ function uninstallSystemd(): void {
   });
 }
 
-function installScheduledTask(_appRoot: string): WatcherKind {
-  // schtasks.exe creates a logon-trigger task. We pass the watcher command via /TR.
-  const repair = windowsWatcherTaskCommand();
-  try {
-    deleteScheduledTask("codex-plusplus-watcher-daily");
-    execFileSync("schtasks.exe", [
-      "/Create",
-      "/F",
-      "/SC",
-      "ONLOGON",
-      "/TN",
-      "codex-plusplus-watcher",
-      "/TR",
-      repair,
-    ]);
-    deleteScheduledTask("codex-plusplus-watcher-hourly");
-    deleteScheduledTask("codex-plusplus-watcher-interval");
-    execFileSync("schtasks.exe", [
-      "/Create",
-      "/F",
-      "/SC",
-      "MINUTE",
-      "/MO",
-      String(Math.round(WATCHER_INTERVAL_SECONDS / 60)),
-      "/TN",
-      "codex-plusplus-watcher-interval",
-      "/TR",
-      repair,
-    ]);
-    return "scheduled-task";
-  } catch {
-    return "none";
-  }
-}
-
 function cliShellCommand(command: string, args: string[] = []): string {
   const cli = currentCliPath();
   return [
@@ -315,44 +281,8 @@ function xmlEscape(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
-function windowsCommand(command: string, args: string[] = []): string {
-  const cli = currentCliPath();
-  return [
-    windowsQuote(process.execPath),
-    ...nodeExecArgsForCli(cli).map(windowsQuote),
-    windowsQuote(cli),
-    command,
-    ...args,
-  ].join(" ");
-}
-
 function nodeExecArgsForCli(cliPath: string): string[] {
   return cliPath.endsWith(".ts") ? process.execArgv : [];
-}
-
-function windowsWatcherTaskCommand(): string {
-  const scriptPath = join(windowsCodexPlusPlusDir(), "bin", "watcher.cmd");
-  mkdirSync(dirname(scriptPath), { recursive: true });
-  writeFileSync(
-    scriptPath,
-    [
-      "@echo off",
-      "set CODEX_PLUSPLUS_WATCHER=1",
-      `${windowsCommand("update", ["--watcher", "--quiet", "--no-repair"])}`,
-      `${windowsCommand("repair", ["--watcher", "--quiet"])}`,
-      "exit /b 0",
-      "",
-    ].join("\r\n"),
-  );
-  return windowsQuote(scriptPath);
-}
-
-function windowsQuote(value: string): string {
-  return `"${value.replace(/"/g, `\\"`)}"`;
-}
-
-function windowsCodexPlusPlusDir(): string {
-  return join(process.env.APPDATA ?? join(homedir(), "AppData", "Roaming"), "codex-plusplus");
 }
 
 function uninstallScheduledTask(): void {
