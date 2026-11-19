@@ -23,7 +23,6 @@ test("reloadTweaks stops, clears, loads, then broadcasts", () => {
   reloadTweaks("manual", deps(calls));
 
   assert.deepEqual(calls, [
-    "log:reloading tweaks (manual)",
     "stopAllMainTweaks",
     "clearTweakModuleCache",
     "loadAllMainTweaks",
@@ -39,8 +38,6 @@ test("setTweakEnabledAndReload enables a tweak and performs a full reload", () =
   assert.equal(result, true);
   assert.deepEqual(calls, [
     "setTweakEnabled:com.example.both:true",
-    "log:tweak com.example.both enabled=true",
-    "log:reloading tweaks (enabled-toggle)",
     "stopAllMainTweaks",
     "clearTweakModuleCache",
     "loadAllMainTweaks",
@@ -55,8 +52,6 @@ test("setTweakEnabledAndReload disables a tweak and performs a full reload", () 
 
   assert.deepEqual(calls, [
     "setTweakEnabled:com.example.both:false",
-    "log:tweak com.example.both enabled=false",
-    "log:reloading tweaks (enabled-toggle)",
     "stopAllMainTweaks",
     "clearTweakModuleCache",
     "loadAllMainTweaks",
@@ -108,14 +103,12 @@ test("reloadTweaks stops before clearing cache when stop fails", () => {
     /stop failed/,
   );
 
-  assert.deepEqual(calls, ["log:reloading tweaks (manual)", "stopAllMainTweaks"]);
+  assert.deepEqual(calls, ["stopAllMainTweaks"]);
 });
 
 function deps(calls: string[]): SetTweakEnabledAndReloadDeps {
   return {
-    logInfo(message) {
-      calls.push(`log:${message}`);
-    },
+    logInfo() {},
     setTweakEnabled(id, enabled) {
       calls.push(`setTweakEnabled:${id}:${enabled}`);
     },

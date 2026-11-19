@@ -1,25 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  buildWindowsManagedCleanupScript,
-  WINDOWS_CODEX_CONTEXT_MENU_KEYS,
-} from "../src/windows-cleanup";
+import { buildWindowsManagedCleanupScript } from "../src/windows-cleanup";
 
-test("Windows cleanup removes only Codex++ managed context menu entries", () => {
-  const script = buildWindowsManagedCleanupScript({
+function cleanupPaths(script: string): string[] {
+  const block = /\$cleanupPaths = @\(\n([\s\S]*?)\n\)/.exec(script)?.[1] ?? "";
+  return block.split("\n").map((line) => {
+    const match = /^  '((?:[^']|'')*)'$/.exec(line);
+    assert.ok(match, `cleanup path is not one single-quoted literal: ${line}`);
+    return match[1].replace(/''/g, "'");
+  });
+}
+
+test("Windows cleanup removes only Codex++ managed paths", () => {
+  const paths = cleanupPaths(buildWindowsManagedCleanupScript({
     localAppData: "C:\\Users\\Admin\\AppData\\Local",
     appData: "C:\\Users\\Admin\\AppData\\Roaming",
     home: "C:\\Users\\Admin",
-  });
+  }));
 
-  assert.match(script, /OpenProjectInCodex/);
-  assert.match(script, /GetValue\(''\)/);
-  assert.match(script, /\\codex-plusplus\\store-apps\\/);
-  assert.match(script, /Remove-Item -LiteralPath \$key -Recurse -Force/);
-  assert.match(script, /codex-plusplus-codex\.cmd/);
-  assert.match(script, /Codex\+\+\.lnk/);
-  assert.match(script, /store-apps/);
-  for (const key of WINDOWS_CODEX_CONTEXT_MENU_KEYS) {
-    assert.match(script, new RegExp(key.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&")));
+  assert.equal(paths.length, 4);
+  for (const path of paths) {
+    assert.match(path, /codex-plusplus|Codex\+\+/);
   }
+});
+
+test("Windows cleanup keeps user-controlled paths inside quoted literals", () => {
+  const home = "C:\\Users\\O'Brien'; Remove-Item C:\\ -Recurse; '";
+  const paths = cleanupPaths(buildWindowsManagedCleanupScript({ home }));
+
+  assert.equal(paths.length, 1);
+  assert.ok(paths[0].startsWith(home));
 });
