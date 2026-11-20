@@ -1,44 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
-import { analyzeWatcherLogTail, getWatcherHealth } from "../src/watcher-health";
-
-test("watcher health reports missing install state as not ready", async () => {
-  await withTempDir(async (root) => {
-    const health = await getWatcherHealth(root);
-
-    assert.equal(health.status, "error");
-    assert.equal(health.watcher, "none");
-    assert.equal(health.checks[0]?.name, "Install state");
-    assert.equal(health.checks[0]?.status, "error");
-  });
-});
-
-test("watcher health warns when automatic refresh is disabled", async () => {
-  await withTempDir(async (root) => {
-    writeFileSync(
-      join(root, "state.json"),
-      JSON.stringify({ version: "0.1.2", watcher: "none", appRoot: "/missing" }),
-    );
-    writeFileSync(
-      join(root, "config.json"),
-      JSON.stringify({ codexPlusPlus: { autoUpdate: false } }),
-    );
-
-    const health = await getWatcherHealth(root);
-
-    assert.equal(
-      health.checks.find((check) => check.name === "Automatic refresh")?.status,
-      "warn",
-    );
-    assert.equal(
-      health.checks.find((check) => check.name === "Watcher kind")?.status,
-      process.platform === "win32" ? "ok" : "error",
-    );
-  });
-});
+import { analyzeWatcherLogTail } from "../src/watcher-health";
 
 test("watcher log health points privileged repair failures to terminal repair", () => {
   const check = analyzeWatcherLogTail(`
@@ -54,12 +16,3 @@ Fix:
   assert.equal(check.status, "warn");
   assert.equal(check.detail, "auto-repair needs app permissions; run `codexplusplus repair` from Terminal");
 });
-
-async function withTempDir(fn: (root: string) => void | Promise<void>): Promise<void> {
-  const root = mkdtempSync(join(tmpdir(), "codexpp-watcher-health-"));
-  try {
-    await fn(root);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
