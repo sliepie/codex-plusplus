@@ -10,6 +10,7 @@ import {
   CODEX_WINDOW_SERVICES_KEY,
   patchCodexWindowServicesSource,
 } from "../src/codex-window-services";
+import { describeInstallationSource } from "../src/source-root";
 import { watcherShellScript } from "../src/watcher";
 
 test("window services patch separates the exposed service from the next setup call", () => {
@@ -180,4 +181,25 @@ test("self-update command failures include a bounded output tail", () => {
   assert.match(message, /'\/tmp\/codex plusplus\/cli\.js' repair failed with exit code 1/);
   assert.match(message, /stderr:\nnested repair error/);
   assert.match(message, /stdout:\nstdout detail/);
+});
+
+test("self-update command failures keep only the end of long output", () => {
+  const stderr = `FIRST-LINE\n${"x".repeat(50_000)}\nLAST-LINE`;
+  const message = formatCommandFailure("/usr/bin/node", ["cli.js", "repair"], {
+    status: 1,
+    signal: null,
+    stdout: "",
+    stderr,
+  });
+
+  assert.ok(message.length < stderr.length / 2);
+  assert.doesNotMatch(message, /FIRST-LINE/);
+  assert.match(message, /LAST-LINE$/);
+});
+
+test("installation source labels Homebrew installs", () => {
+  assert.equal(
+    describeInstallationSource("/opt/homebrew/Cellar/codexplusplus/0.1.4").kind,
+    "homebrew",
+  );
 });
